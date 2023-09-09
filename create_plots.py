@@ -1,16 +1,28 @@
 # -*- coding: utf-8 -*-
+# Importar Librerías
 
 import pandas as pd
 import numpy as np
 import re
 import string
+import plotly.express as px
+
 import warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning)
+
 try:
   from bertopic import BERTopic
 except:
   !pip install bertopic
   from bertopic import BERTopic
+
+from bertopic.representation import KeyBERTInspired
+from bertopic.representation import MaximalMarginalRelevance
+from bertopic.representation import PartOfSpeech
+from umap import UMAP
+
+!python -m spacy download es_core_news_sm
+import es_core_news_sm
 
 class news_processor:
   # meses auto
@@ -44,6 +56,7 @@ class news_processor:
         try:
             url = dataset.data_url + m + '.csv.gz?raw=true'
             files[m] = pd.read_csv(url, compression='gzip')
+            print('downloading',url)
         except:
             dataset.months.remove(m)
 
@@ -65,13 +78,15 @@ class news_processor:
     dataset.df.reset_index(drop=True,inplace=True)
 
     # Limpiar
-    import time
-    now = time.localtime()
-    rango = list([time.localtime(time.mktime((now.tm_year, now.tm_mon - n, 1, 0, 0, 0, 0, 0, 0)))[:2] for n in range(m)])
-    months_clean = []
-    for y,m in rango:
-      months_clean.append(str(y)+'-'+str(m))
-    dataset.df = dataset.df[dataset.df.yyyymm.isin(months_clean)]
+    m = [ x[:4] + '-' + str(int(x[-2:])*1) for x in dataset.months ]
+    dataset.df = dataset.df[dataset.df.yyyymm.isin(m)]
+    # import time
+    # now = time.localtime()
+    # rango = list([time.localtime(time.mktime((now.tm_year, now.tm_mon - n, 1, 0, 0, 0, 0, 0, 0)))[:2] for n in range(m)])
+    # months_clean = []
+    # for y,m in rango:
+    #   months_clean.append(str(y)+'-'+str(m))
+    # dataset.df = dataset.df[dataset.df.yyyymm.isin(months_clean)]
 
   def create_corpus_df(dataset):
     print('Creating corpus')
@@ -109,11 +124,11 @@ class news_processor:
 
   def clean_text(dataset,text):
     '''
-    Make text lowercase, remove text in square brackets, 
+    Make text lowercase, remove text in square brackets,
     remove punctuation and remove words containing numbers.
     '''
     # todo a minúsculas
-    text = text.lower() 
+    text = text.lower()
     # remover caracteres especiales
     text = re.sub('\[.*\]\%;,"“”', ' ', text)
     # remover puntuación
@@ -154,9 +169,19 @@ class news_processor:
     # embeddings = TransformerDocumentEmbeddings('dccuchile/bert-base-spanish-wwm-cased')
     # from transformers.pipelines import pipeline
     # embedding_model = pipeline("feature-extraction", model="LeoCordoba/mt5-small-cc-news-es-titles")
+    umap_model = UMAP(n_neighbors=15, n_components=5, min_dist=0.0, metric='cosine', random_state=42)
+
     print('Creating Topic Model')
+    # Create your representation model
+    #representation_model = MaximalMarginalRelevance(diversity=0.3)
+    representation_model = PartOfSpeech("es_core_news_sm")
+    #chain = load_qa_chain(OpenAI(temperature=0, openai_api_key=my_openai_api_key), chain_type="stuff")
+    # Create your representation model
+    #representation_model = LangChain(chain)
+    #representation_model = KeyBERTInspired()
     dataset.topic_model = BERTopic(language="multilingual",
                        calculate_probabilities=True,
+                       representation_model=representation_model,
                        embedding_model=dataset.embedding_model,
                        min_topic_size=10,
                        #embedding_model="all-distilroberta-v1",
@@ -223,45 +248,94 @@ class news_processor:
         from matplotlib import pyplot as plt
         dataset.final.pivot('yyyymm','source','porc').plot.bar(figsize=(10,3),title=tema)
 
-  def plot_topics_over_time(dataset,bins,n=10,save=False):
-    ovt_df = dataset.topic_model.topics_over_time(dataset.final_dataset_df.text.to_list() , pd.to_datetime(pd.to_datetime(dataset.timestamp).date) , nr_bins=bins)
-    ovt_df = ovt_df[ovt_df.Topic.isin(np.arange(0,n))]
-    topic_names = dataset.topic_model.get_topic_info()[['Topic','Name']]
-    ovt_df = pd.merge(ovt_df,topic_names,how='left',left_on='Topic',right_on='Topic')
-    ovt_df.Timestamp = pd.to_datetime(ovt_df.Timestamp).dt.date
-    import plotly.express as px
-    fig = px.line(ovt_df, x="Timestamp", y="Frequency", color='Name',hover_name=None, hover_data=["Timestamp", "Frequency", "Words"])
-    if save:
-      name = 'ovt_'+ dataset.section + '.html'
-      fig.write_html(name)
-      print(name,'stored')
-    else:
-      fig.show()
+  def filter_classes_within_devest(dataframe,classname,quantity,num_deviations):
+    # Calculate the mean and standard deviation of the quantity column
+    mean_quantity = dataframe[quantity].mean()
+    std_quantity = dataframe[quantity].std()
 
-  def plot_topics_over_time2(dataset,topics):
-    if hasattr(dataset, 'topics_over_time'):
-      display(dataset.topic_model.visualize_topics_over_time(dataset.topics_over_time, topics=topics))
-    else:
-      dataset.topics_over_time = dataset.topic_model.topics_over_time( dataset.final_dataset_df.text.to_list() , dataset.timestamp , nr_bins=30)
-      display(dataset.topic_model.visualize_topics_over_time(dataset.topics_over_time, topics=topics))
+    # Define a threshold for inclusion (n standard deviations from the mean)
+    threshold = num_deviations * std_quantity
 
-section_range = ['deportes','politica','economia']
+    # Filter the DataFrame based on the threshold
+    filtered_df = dataframe[abs(dataframe[quantity] - mean_quantity) <= threshold]
 
-for sect in section_range:
-  data = news_processor(data_url='https://github.com/fermasia/news-base/blob/main/files/',
-                        months = 'auto', #['202303','202304','202305'],
-                        section = sect,   # Sección para filtrar, si queda en blanco se usan todas las noticias
-                        content = 2,  # 1 solo titulos 2 solo cuerpo 3 ambos (default)
-                        stopwords_url = 'https://raw.githubusercontent.com/jbagnato/machine-learning/master/nlp/spanish.txt',
-                        embedding_model='distiluse-base-multilingual-cased-v1')
+    # Get the list of class names that meet the criteria
+    class_names = filtered_df[classname].unique()
 
-  data.download()
-  data.prepare()
-  data.create_corpus_df()
-  #data.clean_corpus_df()
-  data.remove_stopwords_corpus_df()
-  data.build_final_dataset_df()
-  data.create_topic_model()
+    return class_names
 
-  data.plot_bars(q=10,figsize=(18,3),save=True)
-  data.plot_topics_over_time(bins=12,n=10,save=True)
+  def plot_topics_over_time(dataset, bins, number_of_topics=10, save=False, num_deviations=2):
+      # Calculate topics over time
+      ovt_df = dataset.topic_model.topics_over_time(
+          dataset.final_dataset_df.text.to_list(),
+          pd.to_datetime(pd.to_datetime(dataset.timestamp).date),
+          nr_bins=bins
+      )
+
+      # Filter topics based on frequency
+      # Calculate the mean and standard deviation of the quantity column
+      mean_quantity = ovt_df['Frequency'].mean()
+      std_quantity = ovt_df['Frequency'].std()
+      # Define a threshold for inclusion (n standard deviations from the mean)
+      threshold = num_deviations * std_quantity
+
+      # Filter the DataFrame based on the threshold
+      filtered_df = ovt_df[abs(ovt_df['Frequency'] - mean_quantity) <= threshold]
+
+      # Get the list of class names that meet the criteria
+      class_names = filtered_df['Topic'].unique()
+      ovt_df = ovt_df[ovt_df.Topic.isin(class_names)]
+
+      # Filter topics based on the number_of_topics
+      ovt_df = ovt_df[ovt_df.Topic.isin(np.arange(0, number_of_topics))]
+
+      # Get topic names
+      topic_names = dataset.topic_model.get_topic_info()[['Topic', 'Name']]
+
+      # Merge topic names with ovt_df
+      ovt_df = pd.merge(ovt_df, topic_names, how='left', left_on='Topic', right_on='Topic')
+
+      # Convert Timestamp to date
+      ovt_df['Timestamp'] = pd.to_datetime(ovt_df['Timestamp']).dt.date
+
+      # Create a line plot
+      fig = px.line(
+          ovt_df,
+          x="Timestamp",
+          y="Frequency",
+          color='Name',
+          hover_name=None,
+          hover_data=["Timestamp", "Frequency", "Words"]
+      )
+
+      if save:
+          # Save the plot as an HTML file
+          name = 'ovt_' + dataset.section + '.html'
+          fig.write_html(name)
+          print(name, 'stored')
+      else:
+          # Show the plot
+          fig.show()
+
+##############
+
+sect = 'politica'
+
+data = news_processor(data_url='https://github.com/fermasia/news-base/blob/main/files/',
+                      months = ['202306','202307','202308'],
+                      section = sect,   # Sección para filtrar, si queda en blanco se usan todas las noticias
+                      content = 2,  # 1 solo titulos 2 solo cuerpo 3 ambos (default)
+                      stopwords_url = 'https://raw.githubusercontent.com/jbagnato/machine-learning/master/nlp/spanish.txt',
+                      #embedding_model = embedding_model)
+                      embedding_model='paraphrase-multilingual-mpnet-base-v2')
+                      #embedding_model='distiluse-base-multilingual-cased-v1')
+
+data.download()
+data.prepare()
+data.create_corpus_df()
+data.clean_corpus_df()
+data.remove_stopwords_corpus_df()
+data.build_final_dataset_df()
+data.create_topic_model()
+data.plot_bars(q=20,figsize=(15,2),save=False)
+data.plot_topics_over_time(bins=8,number_of_topics=10,save=True)
